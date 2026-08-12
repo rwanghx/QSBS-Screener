@@ -11,6 +11,10 @@ A private, single-page preliminary screener for federal qualified small business
 - Active-business, excluded-business, redemption, and documentation flags
 - §1045 six-month / 60-day rollover alert
 - Advisor-question generator and print / Save PDF report
+- Holder-aware routing for individuals, joint owners, trusts, and pass-through entities
+- Option, SAFE, convertible-note, gift, inheritance, exchange, and secondary-purchase paths
+- Unknown or estimated gross-asset workflow with targeted substantiation requests
+- Personalized documentation requests and fact-specific advisor questions
 - Responsive mobile and desktop layout
 - No server, cookies, analytics, local storage, accounts, or data transmission
 
@@ -57,7 +61,7 @@ The $15 million per-issuer limit and $75 million gross-asset threshold are subje
 - [Rev. Proc. 98-48](https://www.irs.gov/pub/irs-drop/rp98-48.pdf)
 - [Treas. Reg. §1.1045-1 / IRB 2007-40](https://www.irs.gov/irb/2007-40_IRB)
 
-Federal tax law was verified through **August 12, 2026**.
+Federal tax law was re-verified through **August 12, 2026** for Version 1.1.
 
 ## Architecture
 

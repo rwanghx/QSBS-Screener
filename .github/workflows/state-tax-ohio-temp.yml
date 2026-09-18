@@ -1,0 +1,32 @@
+name: Temporary Current Ohio CAT Guide
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-ohio-temp.yml'
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests pypdf
+      - name: Fetch current Ohio business tax guide
+        run: |
+          python - <<'PY'
+          import requests, io, zipfile
+          from pathlib import Path
+          from pypdf import PdfReader
+          u='https://dam.assets.ohio.gov/image/upload/tax.ohio.gov/documents/Small_Business_Tax_Guide_2026.pdf'
+          r=requests.get(u,headers={'User-Agent':'Mozilla/5.0'},timeout=45); r.raise_for_status()
+          rd=PdfReader(io.BytesIO(r.content))
+          txt='\n'.join((p.extract_text() or '') for p in rd.pages).lower()
+          assert 'commercial activity tax' in txt and '$6 million' in txt and 'quarterly' in txt
+          out=Path('OH_Ohio_CAT_Current_Guidance.pdf'); out.write_bytes(r.content)
+          with zipfile.ZipFile('Ohio_Current_CAT_Guidance.zip','w',zipfile.ZIP_DEFLATED) as z: z.write(out,out.name)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ohio-current-cat-guidance
+          path: Ohio_Current_CAT_Guidance.zip
+          retention-days: 1

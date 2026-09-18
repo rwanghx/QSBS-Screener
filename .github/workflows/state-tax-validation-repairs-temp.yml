@@ -1,0 +1,124 @@
+name: Temporary Validate Corporate Instruction Replacements
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-validation-repairs-temp.yml'
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests beautifulsoup4 pypdf reportlab
+      - name: Fetch validated replacements
+        shell: bash
+        run: |
+          cat > /tmp/fix.py <<'PY'
+          from pathlib import Path
+          from urllib.parse import urljoin
+          import requests, re, csv, io, zipfile, html as htmllib
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          from reportlab.lib.pagesizes import letter
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+          from reportlab.lib.styles import getSampleStyleSheet
+          from reportlab.lib.units import inch
+          OUT=Path('validated_repairs'); OUT.mkdir(exist_ok=True)
+          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36'})
+          DIRECT=[
+            ('AR','Arkansas','AR1100CT','AR_Arkansas_AR1100CT_Instructions.pdf','https://www.dfa.arkansas.gov/wp-content/uploads/CorporationIncomeTaxInstructions_2025.pdf','2025'),
+            ('CA','California','Form 100','CA_California_100_Instructions.pdf','https://www.ftb.ca.gov/forms/2025/2025-100-booklet.pdf','2025'),
+            ('ME','Maine','1120ME','ME_Maine_1120ME_Instructions.pdf','https://www.maine.gov/revenue/sites/maine.gov.revenue/files/inline-files/26_1120me_gen_instr_w_cover_pg.pdf','2026'),
+            ('OR','Oregon','OR-20','OR_Oregon_OR-20_Instructions.pdf','https://www.oregon.gov/DOR/forms/FormsPubs/form-or-20-instructions_102-020-1_2025.pdf','2025'),
+            ('SC','South Carolina','SC1120','SC_South_Carolina_SC1120_Instructions.pdf','https://www.dor.sc.gov/sites/dor/files/forms/SC1120I.pdf','2025'),
+          ]
+          TARGETED=[
+            ('IN','Indiana','IT-20','IN_Indiana_IT-20_Instructions.pdf','https://www.in.gov/dor/tax-forms/corporate/current-corporatepartnership/','IT-20 Booklet','2025'),
+            ('LA','Louisiana','CIT-620','LA_Louisiana_CIT-620_Instructions.pdf','https://revenue.louisiana.gov/tax-forms/businesses/','CIT - 620 Instructions','2025'),
+            ('VA','Virginia','500','VA_Virginia_500_Instructions.pdf','https://www.tax.virginia.gov/forms/search?category=2&page=0','500 Instructions','2025'),
+          ]
+          rows=[]
+          def get(u,timeout=35):
+            r=S.get(u,timeout=(8,timeout),allow_redirects=True); r.raise_for_status(); return r
+          def okpdf(data):
+            if not data.startswith(b'%PDF'): return False
+            try: return len(PdfReader(io.BytesIO(data)).pages)>0
+            except: return False
+          def save_direct(ab,st,form,fn,u,year):
+            try:
+              r=get(u)
+              if not okpdf(r.content): raise RuntimeError('not valid PDF')
+              (OUT/fn).write_bytes(r.content)
+              rows.append([st,ab,form,year,'official_pdf',r.url,fn,'OK',''])
+            except Exception as e:
+              rows.append([st,ab,form,year,'failed',u,fn,'REVIEW',str(e)])
+          for x in DIRECT: save_direct(*x)
+          for ab,st,form,fn,page,label,year in TARGETED:
+            try:
+              r=get(page); sp=BeautifulSoup(r.text,'html.parser')
+              cand=[]
+              for a in sp.find_all('a',href=True):
+                txt=' '.join(a.stripped_strings).strip()
+                if label.lower() in txt.lower() or (ab=='VA' and '500' in txt and 'instruction' in txt.lower()) or (ab=='LA' and '620' in txt and 'instruction' in txt.lower()):
+                  cand.append((txt,urljoin(r.url,a['href'])))
+              # Indiana: require IT-20, explicitly reject IT-20S
+              if ab=='IN': cand=[c for c in cand if 'it-20s' not in (c[0]+' '+c[1]).lower()]
+              if not cand: raise RuntimeError('target link not found')
+              got=None
+              for txt,u in cand:
+                try:
+                  rr=get(u)
+                  if okpdf(rr.content): got=(rr.content,rr.url); break
+                except: pass
+              if not got: raise RuntimeError('target PDF could not be downloaded')
+              (OUT/fn).write_bytes(got[0])
+              rows.append([st,ab,form,year,'official_pdf',got[1],fn,'OK',''])
+            except Exception as e:
+              rows.append([st,ab,form,year,'failed',page,fn,'REVIEW',str(e)])
+          # Massachusetts: first try official binary; if blocked, render current mirrored Mass DOR text.
+          st,ab,form,fn,year='Massachusetts','MA','355','MA_Massachusetts_355_Instructions.pdf','2025'
+          official='https://www.mass.gov/doc/2025-form-355-instructions/download'
+          try:
+            r=get(official)
+            if not okpdf(r.content): raise RuntimeError('not valid PDF')
+            (OUT/fn).write_bytes(r.content)
+            rows.append([st,ab,form,year,'official_pdf',r.url,fn,'OK',''])
+          except Exception as offerr:
+            mirror='https://library.partnertax.ai/us-ma/forms/form-355'
+            try:
+              r=get(mirror); sp=BeautifulSoup(r.text,'html.parser')
+              for tag in sp(['script','style','nav','footer','header','noscript','svg','button','form']): tag.decompose()
+              main=sp.find('main') or sp.find('article') or sp.body or sp
+              styles=getSampleStyleSheet()
+              story=[Paragraph('Massachusetts Department of Revenue — 2025 Form 355 Instructions',styles['Title']),
+                     Paragraph('Current Mass DOR instruction text mirrored at PartnerTax; official Mass.gov PDF endpoint blocked automated download.',styles['BodyText']),
+                     Paragraph('Official source: '+htmllib.escape(official),styles['BodyText']),
+                     Paragraph('Mirror used: '+htmllib.escape(mirror),styles['BodyText']),Spacer(1,.15*inch)]
+              seen=set()
+              for el in main.find_all(['h1','h2','h3','h4','p','li','td']):
+                txt=' '.join(el.stripped_strings)
+                if not txt or txt in seen or len(txt)>6000: continue
+                seen.add(txt)
+                sty=styles['Heading2'] if el.name=='h1' else styles['Heading3'] if el.name in ('h2','h3','h4') else styles['BodyText']
+                try: story.extend([Paragraph(htmllib.escape(txt),sty),Spacer(1,.025*inch)])
+                except: pass
+              if len(story)<20: raise RuntimeError('insufficient mirrored text')
+              SimpleDocTemplate(str(OUT/fn),pagesize=letter,rightMargin=.5*inch,leftMargin=.5*inch,topMargin=.5*inch,bottomMargin=.5*inch).build(story)
+              if not okpdf((OUT/fn).read_bytes()): raise RuntimeError('render invalid')
+              rows.append([st,ab,form,year,'current_official_text_mirror_rendered_to_pdf',mirror,fn,'OK',f'Official binary blocked: {offerr}'])
+            except Exception as e:
+              rows.append([st,ab,form,year,'failed',official,fn,'REVIEW',str(e)])
+          with (OUT/'VALIDATED_REPAIR_MANIFEST.csv').open('w',newline='',encoding='utf-8-sig') as f:
+            w=csv.writer(f); w.writerow(['State','Abbrev','Core Form','Tax Year','Source Type','Source URL','PDF File','Status','Notes']); w.writerows(rows)
+          with zipfile.ZipFile('Validated_Corporate_Instruction_Repairs.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for p in OUT.iterdir(): z.write(p,p.name)
+          print('RESULTS')
+          for r in rows: print(r)
+          PY
+          python /tmp/fix.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-corporate-instruction-repairs
+          path: Validated_Corporate_Instruction_Repairs.zip
+          retention-days: 1

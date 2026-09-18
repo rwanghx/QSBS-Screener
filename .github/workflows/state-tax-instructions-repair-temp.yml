@@ -1,0 +1,213 @@
+name: Temporary Repair State Corporate Instructions
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-instructions-repair-temp.yml'
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests beautifulsoup4 pypdf reportlab
+      - name: Repair missing instruction PDFs
+        shell: bash
+        run: |
+          cat > /tmp/repair.py <<'PY'
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse
+          import csv, io, re, html as htmllib, zipfile
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          from reportlab.lib.pagesizes import letter
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+          from reportlab.lib.styles import getSampleStyleSheet
+          from reportlab.lib.units import inch
+
+          OUT=Path('repairs'); OUT.mkdir(exist_ok=True)
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36'
+          S=requests.Session()
+          S.headers.update({'User-Agent':UA,'Accept':'text/html,application/xhtml+xml,application/pdf,*/*;q=0.8'})
+
+          ITEMS = [
+            dict(st='Alaska',ab='AK',form='6000',fn='AK_Alaska_6000_Instructions.pdf',
+                 urls=['https://tax.alaska.gov/programs/documentviewer/viewer.aspx?7531f',
+                       'https://www.taxformfinder.org/forms/2025/2025-alaska-form-6000i.pdf'],
+                 page='https://tax.alaska.gov/programs/forms.aspx',
+                 note='2025 Form 6000 instructions; current state source is Alaska DOR document viewer'),
+            dict(st='Colorado',ab='CO',form='DR 0112',fn='CO_Colorado_DR_0112_Instructions.pdf',
+                 urls=[],
+                 page='https://tax.colorado.gov/corporate-income-tax-guide',
+                 note='Colorado publishes current corporate guidance as an online Corporate Income Tax Guide'),
+            dict(st='Delaware',ab='DE',form='CIT-TAX',fn='DE_Delaware_1100_Instructions.pdf',
+                 urls=['https://revenuefiles.delaware.gov/2025/BusinessTaxForms_Instructions/CIT-TAX_2025-01_Instructions.pdf'],
+                 page='https://revenue.delaware.gov/forms/',
+                 note='Delaware current corporate income tax instructions are Form CIT-TAX'),
+            dict(st='Hawaii',ab='HI',form='N-30',fn='HI_Hawaii_N-30_Instructions.pdf',
+                 urls=['https://files.hawaii.gov/tax/forms/current/n30ins.pdf'],
+                 page='https://tax.hawaii.gov/forms/a1_b1_3corp/',note='2025 Form N-30 instructions'),
+            dict(st='Kentucky',ab='KY',form='720',fn='KY_Kentucky_720_Instructions.pdf',
+                 urls=['https://revenue.ky.gov/Forms/INSTR_41A720(I)%20(2025).pdf',
+                       'https://revenue.ky.gov/Forms/2025_41A720(I).pdf',
+                       'https://revenue.ky.gov/Forms/41A720(I)%20(2025).pdf'],
+                 page='https://revenue.ky.gov/Get-Help/Pages/Forms.aspx',note='2025 Form 720 instructions'),
+            dict(st='Massachusetts',ab='MA',form='355',fn='MA_Massachusetts_355_Instructions.pdf',
+                 urls=['https://www.mass.gov/doc/2025-form-355-instructions/download'],
+                 page='https://www.mass.gov/lists/2025-massachusetts-corporate-excise-tax-forms-and-instructions',note='2025 Form 355 instructions'),
+            dict(st='Maryland',ab='MD',form='500',fn='MD_Maryland_500_Instructions.pdf',
+                 urls=['https://www.marylandcomptroller.gov/content/dam/mdcomp/tax/instructions/2025/corporate-booklet.pdf'],
+                 page='https://www.marylandcomptroller.gov/taxes/forms.html',note='Tax Year 2025 Corporate Booklet'),
+            dict(st='North Dakota',ab='ND',form='Form 40',fn='ND_North_Dakota_Form_40_Instructions.pdf',
+                 urls=['https://www.tax.nd.gov/sites/www/files/documents/forms/business/corporate-income/2025-corp/28714-corp-income-tax-booklet-2025.pdf'],
+                 page='https://www.tax.nd.gov/business/corporate-income-tax/forms',note='2025 Corporate Income Tax Instructions'),
+            dict(st='Nebraska',ab='NE',form='1120N',fn='NE_Nebraska_1120N_Instructions.pdf',
+                 urls=['https://revenue.nebraska.gov/sites/default/files/doc/tax-forms/2025/f_Corp_Booklet.pdf'],
+                 page='https://revenue.nebraska.gov/businesses/corporate-income-tax',note='2025 Nebraska Corporation Income Tax Booklet'),
+            dict(st='New Hampshire',ab='NH',form='NH-1120',fn='NH_New_Hampshire_NH-1120_Instructions.pdf',
+                 urls=['https://www.revenue.nh.gov/sites/g/files/ehbemt736/files/documents/nh-1120-instructions-2025.pdf',
+                       'https://www.taxformfinder.org/forms/2025/2025-new-hampshire-nh-1120-inst.pdf'],
+                 page='https://www.revenue.nh.gov/resource-center/current-year-forms-and-instructions',note='2025 NH-1120 instructions'),
+            dict(st='New Mexico',ab='NM',form='CIT-1',fn='NM_New_Mexico_CIT-1_Instructions.pdf',
+                 urls=['https://klvg4oyd4j.execute-api.us-west-2.amazonaws.com/prod/PublicFiles/34821a9573ca43e7b06dfad20f5183fd/ee3077c8-8b0b-457e-bd1a-b7c1e112d25c/2025cit-ins.pdf',
+                       'https://www.taxformfinder.org/forms/2025/2025-new-mexico-form-cit-1-instructions.pdf'],
+                 page='https://www.tax.newmexico.gov/forms-publications/',note='2025 CIT-1 instructions'),
+            dict(st='Nevada',ab='NV',form='Commerce Tax',fn='NV_Nevada_Commerce_Tax_Instructions.pdf',
+                 urls=['https://tax.nv.gov/wp-content/uploads/2024/05/Commerce-Tax-Return-Instructions-6-20232.pdf'],
+                 page='https://tax.nv.gov/Taxes/Commerce_Tax/',note='Nevada has no general corporate income tax; Commerce Tax instructions are the broad corporate-level business tax guidance'),
+            dict(st='Ohio',ab='OH',form='CAT',fn='OH_Ohio_CAT_Instructions.pdf',
+                 urls=[],
+                 page='https://tax.ohio.gov/business/ohio-business-taxes/commercial-activity-tax',
+                 note='Ohio has no broad corporate net income tax; current Commercial Activity Tax guidance'),
+            dict(st='Pennsylvania',ab='PA',form='CT-1 / REV-1200',fn='PA_Pennsylvania_RCT-101_Instructions.pdf',
+                 urls=['https://www.pa.gov/content/dam/copapwp-pagov/en/revenue/documents/formsandpublications/formsforbusinesses/corporationtax/documents/2025/2025_rev-1200.pdf'],
+                 page='https://www.pa.gov/agencies/revenue/forms-and-publications/corporation-taxes.html',
+                 note='2025 PA Corporate Net Income Tax CT-1 Instructions (REV-1200); supersedes legacy RCT-101 naming'),
+            dict(st='Tennessee',ab='TN',form='FAE170',fn='TN_Tennessee_FAE170_Instructions.pdf',
+                 urls=['https://www.tn.gov/content/dam/tn/revenue/documents/forms/fae/fae170instructions2025.pdf'],
+                 page='https://www.tn.gov/revenue/taxes/franchise---excise-tax/forms.html.html',note='FAE170 instructions for tax periods beginning January 1, 2025 and after'),
+            dict(st='Washington',ab='WA',form='B&O / Excise',fn='WA_Washington_B_O_Excise_Instructions.pdf',
+                 urls=['https://dor.wa.gov/sites/default/files/2025-12/A_25CETRReturnInstructions.pdf'],
+                 page='https://dor.wa.gov/forms-publications/forms-subject/excise-tax-returns-and-addendums/annual-excise-tax-returns',
+                 note='Washington has no general corporate net income tax; 2025 Annual Combined Excise Tax Return instructions'),
+            dict(st='Wisconsin',ab='WI',form='Form 4',fn='WI_Wisconsin_Form_4_Instructions.pdf',
+                 urls=['https://www.revenue.wi.gov/TaxForms2025/2025-Form4-Inst.pdf'],
+                 page='https://www.revenue.wi.gov/Pages/Form/2025-Corporation.aspx',note='2025 Form 4 instructions'),
+          ]
+
+          def get(u, timeout=25):
+              last=None
+              for _ in range(3):
+                  try:
+                      r=S.get(u,timeout=(8,timeout),allow_redirects=True)
+                      if r.status_code < 400: return r
+                      last=RuntimeError(f'HTTP {r.status_code}')
+                  except Exception as e: last=e
+              raise last or RuntimeError('fetch failed')
+
+          def pdf_ok(data):
+              if not data.startswith(b'%PDF'): return False
+              try:
+                  rd=PdfReader(io.BytesIO(data))
+                  return len(rd.pages)>0
+              except Exception: return False
+
+          def html_to_pdf(url, st, form, fn):
+              r=get(url,30)
+              sp=BeautifulSoup(r.text,'html.parser')
+              for tag in sp(['script','style','nav','footer','header','noscript','svg','form']): tag.decompose()
+              main=sp.find('main') or sp.find(id='main-content') or sp.find(id='content') or sp.body or sp
+              styles=getSampleStyleSheet()
+              story=[Paragraph(htmllib.escape(f'{st} {form} - Official Current Tax Instructions / Guidance'),styles['Title']),
+                     Spacer(1,.08*inch),
+                     Paragraph(htmllib.escape('Official source: '+r.url),styles['BodyText']),
+                     Spacer(1,.15*inch)]
+              seen=set()
+              for el in main.find_all(['h1','h2','h3','h4','p','li','td','th']):
+                  txt=' '.join(el.stripped_strings)
+                  if not txt or len(txt)>5000 or txt in seen: continue
+                  seen.add(txt)
+                  sty=styles['Heading2'] if el.name=='h1' else styles['Heading3'] if el.name in ('h2','h3','h4') else styles['BodyText']
+                  try:
+                      story.append(Paragraph(htmllib.escape(txt),sty)); story.append(Spacer(1,.035*inch))
+                  except Exception: pass
+              if len(story)<8: raise RuntimeError('insufficient HTML content')
+              dest=OUT/fn
+              SimpleDocTemplate(str(dest),pagesize=letter,rightMargin=.5*inch,leftMargin=.5*inch,topMargin=.5*inch,bottomMargin=.5*inch).build(story)
+              if not pdf_ok(dest.read_bytes()): raise RuntimeError('rendered PDF invalid')
+              return r.url
+
+          def discover_pdf(page, form):
+              r=get(page,30)
+              sp=BeautifulSoup(r.text,'html.parser')
+              scored=[]
+              for a in sp.find_all('a',href=True):
+                  txt=' '.join(a.stripped_strings); u=urljoin(r.url,a['href'])
+                  b=(txt+' '+u).lower()
+                  sc=0
+                  if 'instruction' in b: sc+=40
+                  if 'booklet' in b: sc+=25
+                  if '2025' in b: sc+=10
+                  if '2026' in b: sc+=6
+                  for t in re.findall(r'[A-Za-z0-9-]+',form):
+                      nt=re.sub('[^a-z0-9]','',t.lower())
+                      if len(nt)>2 and nt in re.sub('[^a-z0-9]','',b): sc+=7
+                  if '.pdf' in b or 'download' in b: sc+=10
+                  if any(x in b for x in ['estimated','voucher','extension','prior']): sc-=15
+                  scored.append((sc,u,txt))
+              for sc,u,txt in sorted(scored,reverse=True):
+                  if sc<18: continue
+                  try:
+                      rr=get(u,25)
+                      if pdf_ok(rr.content): return rr.content,rr.url
+                  except Exception: pass
+              raise RuntimeError('no instruction PDF discovered')
+
+          rows=[]
+          for it in ITEMS:
+              dest=OUT/it['fn']; source=None; typ=None; status='OK'; err=''
+              # try exact URLs first
+              for u in it['urls']:
+                  try:
+                      r=get(u,35)
+                      if pdf_ok(r.content):
+                          dest.write_bytes(r.content); source=r.url
+                          typ='official_pdf' if 'taxformfinder.org' not in r.url else 'mirror_of_current_official_form'
+                          break
+                  except Exception as e: err=str(e)
+              # scrape current official page for a native PDF
+              if not dest.exists():
+                  try:
+                      data,source=discover_pdf(it['page'],it['form'])
+                      dest.write_bytes(data); typ='official_pdf_discovered'
+                  except Exception as e: err=str(e)
+              # render official current HTML where native instruction PDF is absent/unavailable
+              if not dest.exists():
+                  try:
+                      source=html_to_pdf(it['page'],it['st'],it['form'],it['fn']); typ='official_html_rendered_to_pdf'
+                  except Exception as e: err=str(e)
+              if not dest.exists():
+                  status='REVIEW'; typ='failed'; source=it['page']
+                  styles=getSampleStyleSheet()
+                  SimpleDocTemplate(str(dest),pagesize=letter).build([
+                    Paragraph(htmllib.escape(it['st']+' '+it['form']+' - retrieval issue'),styles['Title']),
+                    Paragraph(htmllib.escape(it['note']),styles['BodyText']),
+                    Paragraph(htmllib.escape('Official source: '+it['page']),styles['BodyText']),
+                    Paragraph(htmllib.escape('Error: '+err),styles['BodyText'])])
+              rows.append([it['st'],it['ab'],it['form'],typ,source,it['fn'],status,it['note'],err])
+              print(it['ab'],typ,status,source,flush=True)
+
+          with (OUT/'REPAIR_MANIFEST.csv').open('w',newline='',encoding='utf-8-sig') as f:
+              w=csv.writer(f); w.writerow(['State','Abbrev','Core Form','Source Type','Source URL','PDF File','Status','Notes','Error']); w.writerows(rows)
+          with zipfile.ZipFile('State_Corporate_Instructions_Repairs.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in OUT.iterdir(): z.write(p,p.name)
+          print('repairs',len(rows),'review',sum(r[6]!='OK' for r in rows))
+          PY
+          python /tmp/repair.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: state-corporate-instructions-repairs
+          path: State_Corporate_Instructions_Repairs.zip
+          retention-days: 1

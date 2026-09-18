@@ -1,0 +1,46 @@
+name: Temporary Final LA Maine Downloadable Corporate Instructions
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-final-downloadable-temp.yml'
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests pypdf
+      - name: Fetch exact instruction PDFs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import requests, csv, io, zipfile
+          from pypdf import PdfReader
+          out=Path('out'); out.mkdir()
+          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0'})
+          items=[
+            ('Louisiana','LA','CIT-620','2025','https://dam.ldr.la.gov/taxforms/Cift620i-2025.pdf','LA_Louisiana_CIT-620_Instructions.pdf','Current 2025 CIT-620i'),
+            ('Maine','ME','1120ME','2025','https://www.maine.gov/revenue/sites/maine.gov.revenue/files/inline-files/25_1120me_gen_instr_w_cover_pg.pdf','ME_Maine_1120ME_Instructions.pdf','Latest downloadable official 1120ME instructions; Maine 2026 landing page lists instructions but exposes no downloadable instruction link in static page HTML as of collection date'),
+          ]
+          rows=[]
+          for st,ab,form,yr,u,fn,note in items:
+            r=s.get(u,timeout=(10,45),allow_redirects=True); r.raise_for_status()
+            if not r.content.startswith(b'%PDF'): raise RuntimeError(f'{ab}: not PDF')
+            rd=PdfReader(io.BytesIO(r.content))
+            txt='\n'.join((p.extract_text() or '') for p in rd.pages[:5]).lower()
+            if ab=='LA' and 'cit-620' not in txt: raise RuntimeError('LA wrong PDF')
+            if ab=='ME' and '1120me' not in txt: raise RuntimeError('ME wrong PDF')
+            (out/fn).write_bytes(r.content)
+            rows.append([st,ab,form,yr,'official_pdf',r.url,fn,'OK',note])
+          with (out/'FINAL_DOWNLOADABLE_MANIFEST.csv').open('w',newline='',encoding='utf-8-sig') as f:
+            w=csv.writer(f); w.writerow(['State','Abbrev','Core Form','Tax Year','Source Type','Source URL','PDF File','Status','Notes']); w.writerows(rows)
+          with zipfile.ZipFile('Final_Downloadable_Corporate_Instructions.zip','w',zipfile.ZIP_DEFLATED) as z:
+            for p in out.iterdir(): z.write(p,p.name)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-downloadable-corporate-instructions
+          path: Final_Downloadable_Corporate_Instructions.zip
+          retention-days: 1

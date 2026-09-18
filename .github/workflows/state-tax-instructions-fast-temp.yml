@@ -1,0 +1,236 @@
+name: Temporary Fast State Corporate Instructions Collector
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-instructions-fast-temp.yml'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests beautifulsoup4 pypdf reportlab
+      - name: Parallel collect
+        shell: bash
+        run: |
+          cat > /tmp/fast.py <<'PY'
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse
+          import csv, io, re, zipfile, html as htmllib
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          from reportlab.lib.pagesizes import letter
+          from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+          from reportlab.lib.styles import getSampleStyleSheet
+          from reportlab.lib.units import inch
+
+          OUT=Path('state_corporate_instructions_fast'); OUT.mkdir(exist_ok=True)
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36'
+          STATES=[
+          ('Alabama','AL','20C','https://www.revenue.alabama.gov/forms/',''),
+          ('Alaska','AK','6000','https://www.tax.alaska.gov/programs/forms.aspx',''),
+          ('Arizona','AZ','120','https://azdor.gov/forms/corporate-tax-forms',''),
+          ('Arkansas','AR','AR1100CT','https://www.dfa.arkansas.gov/income-tax/corporation-income-tax/',''),
+          ('California','CA','100','https://www.ftb.ca.gov/forms/2025/2025-100-booklet.html','Official instructions are an HTML booklet'),
+          ('Colorado','CO','DR 0112','https://tax.colorado.gov/corporate-income-tax-forms',''),
+          ('Connecticut','CT','CT-1120','https://portal.ct.gov/drs/drs-forms/current-year-forms/corporation-forms',''),
+          ('Delaware','DE','1100','https://revenue.delaware.gov/forms/',''),
+          ('District of Columbia','DC','D-20','https://otr.cfo.dc.gov/page/corporate-business-franchise-tax-forms',''),
+          ('Florida','FL','F-1120N','https://floridarevenue.com/Pages/forms_index.aspx',''),
+          ('Georgia','GA','600','https://dor.georgia.gov/600-corporation-tax-return',''),
+          ('Hawaii','HI','N-30','https://tax.hawaii.gov/forms/a1_b1_3corp/',''),
+          ('Idaho','ID','41','https://tax.idaho.gov/taxes/income-tax/business-income/forms/form-41/',''),
+          ('Illinois','IL','IL-1120','https://tax.illinois.gov/forms/incometax/currentyear/business-corporate.html',''),
+          ('Indiana','IN','IT-20','https://www.in.gov/dor/tax-forms/corporate/current-corporatepartnership/',''),
+          ('Iowa','IA','IA 1120','https://revenue.iowa.gov/forms/common-forms/corporation-income-tax',''),
+          ('Kansas','KS','K-120','https://www.ksrevenue.gov/forms-btcinc.html',''),
+          ('Kentucky','KY','720','https://revenue.ky.gov/Get-Help/Pages/Forms.aspx',''),
+          ('Louisiana','LA','CIFT-620','https://revenue.louisiana.gov/tax-forms/businesses/',''),
+          ('Maine','ME','1120ME','https://www.maine.gov/revenue/tax-return-forms/corporate-income-tax-2026','2026 annual package is published'),
+          ('Maryland','MD','500','https://services.marylandcomptroller.gov/taxes/en/2025-business-income-tax-forms-and-instructions?id=kb_article_view&sysparm_article=KB0010197',''),
+          ('Massachusetts','MA','355','https://www.mass.gov/lists/2025-massachusetts-corporate-excise-tax-forms-and-instructions',''),
+          ('Michigan','MI','4891','https://www.michigan.gov/taxes/business-taxes/cit/2025-cit-forms-and-instructions/2025-standard-taxpayers',''),
+          ('Minnesota','MN','M4','https://www.revenue.state.mn.us/form-search?page=0&search_text=M4',''),
+          ('Mississippi','MS','83-100','https://www.dor.ms.gov/node/6383',''),
+          ('Missouri','MO','MO-1120 Instructions','https://dor.mo.gov/forms/index.php?formName=MO-1120_Instructions',''),
+          ('Montana','MT','CIT','https://revenue.mt.gov/publications/montana-form-cit-instructions',''),
+          ('Nebraska','NE','1120N','https://revenue.nebraska.gov/businesses/corporate-income-tax',''),
+          ('Nevada','NV','Commerce Tax','https://tax.nv.gov/Taxes/Commerce_Tax/','No general corporate income tax; broad corporate-level Commerce Tax guidance'),
+          ('New Hampshire','NH','NH-1120','https://www.revenue.nh.gov/resource-center/current-year-forms-and-instructions',''),
+          ('New Jersey','NJ','CBT-100','https://www.nj.gov/treasury/taxation/prntcbt.shtml',''),
+          ('New Mexico','NM','CIT-1','https://www.tax.newmexico.gov/forms-publications/',''),
+          ('New York','NY','CT-3-I','https://www.tax.ny.gov/forms/corp_cur_forms.htm',''),
+          ('North Carolina','NC','CD-405','https://www.ncdor.gov/tax-forms/2025-cd-405-c-corporation-tax-return-instructions',''),
+          ('North Dakota','ND','Form 40','https://www.tax.nd.gov/business/corporate-income-tax/forms',''),
+          ('Ohio','OH','CAT','https://tax.ohio.gov/business/ohio-business-taxes/commercial-activity-tax','No broad corporate net income tax; CAT guidance'),
+          ('Oklahoma','OK','512','https://oklahoma.gov/tax/forms/businesses.html',''),
+          ('Oregon','OR','OR-20','https://www.oregon.gov/dor/forms/Pages/default.aspx',''),
+          ('Pennsylvania','PA','RCT-101','https://www.pa.gov/agencies/revenue/forms-and-publications/corporation-taxes.html',''),
+          ('Rhode Island','RI','RI-1120C','https://tax.ri.gov/forms/business-tax-forms/corporate-tax-forms',''),
+          ('South Carolina','SC','SC1120','https://dor.sc.gov/tax/corporate/forms',''),
+          ('South Dakota','SD','N/A','https://dor.sd.gov/businesses/taxes/','No general corporate income tax'),
+          ('Tennessee','TN','FAE170','https://www.tn.gov/revenue/taxes/franchise---excise-tax/forms.html.html',''),
+          ('Texas','TX','2026 Franchise Instructions','https://comptroller.texas.gov/taxes/franchise/forms/2026-franchise.php','2026 report-year package'),
+          ('Utah','UT','TC-20','https://tax.utah.gov/forms-pubs',''),
+          ('Vermont','VT','CO-411','https://tax.vermont.gov/document/2025-instructions-co-411',''),
+          ('Virginia','VA','500','https://www.tax.virginia.gov/corporation-income-tax',''),
+          ('Washington','WA','B&O / Excise','https://dor.wa.gov/file-pay-taxes/filing-frequencies-due-dates','No general corporate net income tax; B&O/excise guidance'),
+          ('West Virginia','WV','CNF-120','https://tax.wv.gov/Business/CorporateIncomeTax/Pages/CorporateIncomeTax.aspx',''),
+          ('Wisconsin','WI','Form 4','https://www.revenue.wi.gov/Pages/Form/2025-Corporation.aspx',''),
+          ('Wyoming','WY','N/A','https://revenue.wyo.gov/','No general corporate income tax'),
+          ]
+          DIRECT={
+          'AL':'https://www.revenue.alabama.gov/wp-content/uploads/2026/01/25f20cinstr.pdf',
+          'AZ':'https://azdor.gov/sites/default/files/document/FORMS_CORPORATE_2025_120_i.pdf',
+          'CT':'https://portal.ct.gov/-/media/drs/forms/2025/corp/ct-1120-instructions_1225.pdf',
+          'DC':'https://otr.cfo.dc.gov/sites/default/files/dc/sites/otr/publication/attachments/2025_D-20_Book_Final_wLinks_02272026.pdf',
+          'FL':'https://floridarevenue.com/Forms_library/current/f1120n.pdf',
+          'ID':'https://tax.idaho.gov/wp-content/uploads/forms/EFO00025/EFO00025_03-02-2026.pdf',
+          'IL':'https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/business/corporate/il-1120-instr.pdf',
+          'IA':'https://revenue.iowa.gov/media/4372/download?inline=',
+          'KS':'https://www.ksrevenue.gov/pdf/corpbook2025.pdf',
+          'ME':'https://www.maine.gov/revenue/sites/maine.gov.revenue/files/inline-files/26_1120me_gen_instr_w_cover_pg.pdf',
+          'MI':'https://www.michigan.gov/taxes/-/media/Project/Websites/taxes/Forms/CIT/TY2025/4891_ty2025-instructions.pdf',
+          'MN':'https://www.revenue.state.mn.us/sites/default/files/2026-07/m4-inst-25.pdf',
+          'NJ':'https://nj.gov/treasury/taxation/pdf/current/cbt/cbt100ins.pdf',
+          'NY':'https://www.tax.ny.gov/pdf/2025/corp/ct3i_2025.pdf',
+          'OK':'https://oklahoma.gov/content/dam/ok/en/tax/documents/forms/businesses/corporate-income-tax/current/512-Pkt.pdf',
+          'RI':'https://tax.ri.gov/sites/g/files/xkgbur541/files/2025-11/2025%20Business%20Corp%20General%20Instructions_d.pdf',
+          'UT':'https://files.tax.utah.gov/tax/forms/current/tc-20inst.pdf',
+          }
+          def sess():
+              s=requests.Session(); s.headers.update({'User-Agent':UA}); return s
+          def safe(s): return re.sub(r'[^A-Za-z0-9._-]+','_',s).strip('_')
+          def get(s,u):
+              r=s.get(u,timeout=(5,12),allow_redirects=True); r.raise_for_status(); return r
+          def ispdf(r): return r.content.startswith(b'%PDF')
+          def ptext(data):
+              try:
+                  rd=PdfReader(io.BytesIO(data)); return '\n'.join((p.extract_text() or '') for p in rd.pages[:5])
+              except: return ''
+          def valid(data, form):
+              if not data.startswith(b'%PDF'): return False
+              t=ptext(data).lower()
+              if not t: return True
+              return any(x in t for x in ['instruction','instructions','booklet','general information','corporate','franchise','commerce tax','excise'])
+          def regdom(u):
+              h=(urlparse(u).hostname or '').lower().split('.'); return '.'.join(h[-2:]) if len(h)>1 else '.'.join(h)
+          def score(txt,u,form):
+              b=(txt+' '+u).lower(); n=re.sub('[^a-z0-9]','',b); sc=0
+              for tok in re.findall(r'[A-Za-z0-9-]+',form):
+                  nt=re.sub('[^a-z0-9]','',tok.lower())
+                  if len(nt)>2 and nt in n: sc+=8
+              if 'instruction' in b: sc+=35
+              if 'booklet' in b: sc+=28
+              if 'packet' in b or 'pkt' in b: sc+=16
+              if '.pdf' in b or 'download' in b: sc+=10
+              if '2026' in b: sc+=6
+              if '2025' in b: sc+=9
+              for bad in ['estimated','voucher','extension','amended','partnership','s corporation']:
+                  if bad in b: sc-=15
+              return sc
+          def links(html,base):
+              sp=BeautifulSoup(html,'html.parser'); out=[]
+              for a in sp.find_all('a',href=True):
+                  u=urljoin(base,a['href'])
+                  if u.startswith('http'): out.append((' '.join(a.stripped_strings),u))
+              return out
+          def htmlpdf(r,state,form,dest):
+              sp=BeautifulSoup(r.text,'html.parser')
+              for tag in sp(['script','style','nav','footer','header','noscript','svg']): tag.decompose()
+              main=sp.find('main') or sp.find(id='main-content') or sp.body or sp
+              styles=getSampleStyleSheet(); story=[
+                  Paragraph(htmllib.escape(f'{state} {form} - Official Instructions / Guidance'),styles['Title']),
+                  Paragraph('Official source: '+htmllib.escape(r.url),styles['Small']),Spacer(1,.15*inch)]
+              for el in main.find_all(['h1','h2','h3','p','li','td']):
+                  txt=' '.join(el.stripped_strings)
+                  if not txt or len(txt)>3500: continue
+                  sty=styles['Heading2'] if el.name=='h1' else styles['Heading3'] if el.name in ('h2','h3') else styles['BodyText']
+                  try: story += [Paragraph(htmllib.escape(txt),sty),Spacer(1,.03*inch)]
+                  except: pass
+              SimpleDocTemplate(str(dest),pagesize=letter,rightMargin=.5*inch,leftMargin=.5*inch,topMargin=.5*inch,bottomMargin=.5*inch).build(story)
+          def notepdf(state,note,url,dest):
+              st=getSampleStyleSheet()
+              SimpleDocTemplate(str(dest),pagesize=letter).build([
+                Paragraph(htmllib.escape(state+' - Corporate State Tax'),st['Title']),
+                Spacer(1,.2*inch),Paragraph(htmllib.escape(note),st['BodyText']),
+                Spacer(1,.2*inch),Paragraph('Official source:',st['Heading3']),Paragraph(htmllib.escape(url),st['BodyText'])])
+          def one(row):
+              state,abbr,form,start,note=row; dest=OUT/f'{abbr}_{safe(state)}_{safe(form)}_Instructions.pdf'; s=sess()
+              if form=='N/A':
+                  notepdf(state,note,start,dest); return [state,abbr,form,'official_state_note',start,dest.name,'OK',note]
+              if abbr in DIRECT:
+                  try:
+                      r=get(s,DIRECT[abbr])
+                      if ispdf(r) and valid(r.content,form):
+                          dest.write_bytes(r.content); return [state,abbr,form,'official_pdf',r.url,dest.name,'OK',note]
+                  except Exception: pass
+              try:
+                  r=get(s,start)
+              except Exception as e:
+                  notepdf(state,'Official source could not be automatically retrieved. '+note,start,dest)
+                  return [state,abbr,form,'retrieval_failure_note',start,dest.name,'REVIEW',str(e)]
+              base_dom=regdom(r.url)
+              cands=[]
+              for txt,u in links(r.text,r.url):
+                  host=(urlparse(u).hostname or '').lower()
+                  if regdom(u)!=base_dom and not host.endswith('.gov'): continue
+                  cands.append((score(txt,u,form),txt,u))
+              for sc,txt,u in sorted(cands,reverse=True)[:30]:
+                  if sc<12: continue
+                  try:
+                      rr=get(s,u)
+                      if ispdf(rr) and valid(rr.content,form):
+                          dest.write_bytes(rr.content); return [state,abbr,form,'official_pdf',rr.url,dest.name,'OK',note]
+                      if 'html' in rr.headers.get('content-type','').lower():
+                          sub=links(rr.text,rr.url)
+                          for t2,u2 in sorted(((score(t,v,form),v) for t,v in sub),reverse=True)[:12]:
+                              if t2<18: continue
+                              try:
+                                  rp=get(s,u2)
+                                  if ispdf(rp) and valid(rp.content,form):
+                                      dest.write_bytes(rp.content); return [state,abbr,form,'official_pdf',rp.url,dest.name,'OK',note]
+                              except: pass
+                  except: pass
+              try:
+                  htmlpdf(r,state,form,dest)
+                  return [state,abbr,form,'official_html_rendered_to_pdf',r.url,dest.name,'OK',note]
+              except Exception as e:
+                  notepdf(state,'Automatic retrieval failed. '+note,start,dest)
+                  return [state,abbr,form,'retrieval_failure_note',start,dest.name,'REVIEW',str(e)]
+
+          rows=[]
+          with ThreadPoolExecutor(max_workers=16) as ex:
+              fut={ex.submit(one,r):r for r in STATES}
+              for f in as_completed(fut):
+                  try: row=f.result()
+                  except Exception as e:
+                      st,ab,fo,src,n=fut[f]; d=OUT/f'{ab}_{safe(st)}_{safe(fo)}_Instructions.pdf'; notepdf(st,'Collector error',src,d); row=[st,ab,fo,'collector_error',src,d.name,'REVIEW',str(e)]
+                  rows.append(row); print(row[1],row[3],row[6],flush=True)
+          rows.sort(key=lambda x:x[1])
+          with (OUT/'MANIFEST.csv').open('w',newline='',encoding='utf-8-sig') as f:
+              w=csv.writer(f); w.writerow(['State','Abbrev','Core Form','Source Type','Source URL','PDF File','Status','Notes']); w.writerows(rows)
+          (OUT/'README.txt').write_text('Collected 2026-09-18 from official state tax/revenue sources. Native agency PDFs are preferred. Where an agency publishes the instructions only as HTML or blocks the direct PDF, the official agency page was rendered to PDF and identified in MANIFEST.csv.\n',encoding='utf-8')
+          with zipfile.ZipFile('Corporate_State_Tax_Instructions_Current_2026-09-18.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(OUT.iterdir()): z.write(p,p.name)
+          print('COUNT',sum(1 for p in OUT.glob('*.pdf')),'ROWS',len(rows))
+          PY
+          python /tmp/fast.py
+      - name: Manifest summary
+        run: |
+          python - <<'PY'
+          import csv
+          rows=list(csv.DictReader(open('state_corporate_instructions_fast/MANIFEST.csv',encoding='utf-8-sig')))
+          from collections import Counter
+          print(Counter(r['Source Type'] for r in rows))
+          print(Counter(r['Status'] for r in rows))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corporate-state-tax-instructions-current-fast
+          path: Corporate_State_Tax_Instructions_Current_2026-09-18.zip
+          retention-days: 1

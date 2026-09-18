@@ -1,0 +1,75 @@
+name: Temporary Final Maine Louisiana Corporate Instructions
+on:
+  push:
+    paths:
+      - '.github/workflows/state-tax-final-two-temp.yml'
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install --quiet requests beautifulsoup4 pypdf
+      - name: Fetch exact current instructions
+        shell: bash
+        run: |
+          cat > /tmp/final_two.py <<'PY'
+          from pathlib import Path
+          from urllib.parse import urljoin
+          import requests, csv, io, zipfile
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          OUT=Path('final_two'); OUT.mkdir(exist_ok=True)
+          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36'})
+          rows=[]
+          def get(u):
+              r=S.get(u,timeout=(10,45),allow_redirects=True); r.raise_for_status(); return r
+          def valid(data, needle):
+              if not data.startswith(b'%PDF'): return False
+              rd=PdfReader(io.BytesIO(data))
+              txt='\n'.join((p.extract_text() or '') for p in rd.pages[:5]).lower()
+              return len(rd.pages)>0 and needle.lower() in txt
+          # Louisiana exact current 2025 instructions, confirmed on LDR current forms page
+          la='https://dam.ldr.la.gov/taxforms/Cift620i-2025.pdf'
+          r=get(la)
+          if not valid(r.content,'CIT-620'):
+              raise RuntimeError('Louisiana instruction validation failed')
+          fn='LA_Louisiana_CIT-620_Instructions.pdf'; (OUT/fn).write_bytes(r.content)
+          rows.append(['Louisiana','LA','CIT-620','2025','official_pdf',r.url,fn,'OK','Current corporation income tax instructions'])
+          # Maine: resolve the exact instruction anchor from the live 2026 page, not a guessed filename.
+          page='https://www.maine.gov/revenue/tax-return-forms/corporate-income-tax-2026'
+          rp=get(page); sp=BeautifulSoup(rp.text,'html.parser')
+          matches=[]
+          for a in sp.find_all('a',href=True):
+              text=' '.join(a.stripped_strings)
+              href=urljoin(rp.url,a['href'])
+              if '1120ME Instructions' in text or ('1120me' in href.lower() and ('instr' in href.lower() or 'instruction' in text.lower())):
+                  matches.append((text,href))
+          print('MAINE_MATCHES',matches,flush=True)
+          got=None
+          for text,u in matches:
+              try:
+                  rr=get(u)
+                  if rr.content.startswith(b'%PDF'):
+                      rd=PdfReader(io.BytesIO(rr.content))
+                      t='\n'.join((p.extract_text() or '') for p in rd.pages[:5]).lower()
+                      if '1120me' in t and ('instruction' in t or 'corporation' in t):
+                          got=(rr.content,rr.url); break
+              except Exception as e:
+                  print('Maine candidate failed',u,e,flush=True)
+          if not got:
+              raise RuntimeError('Could not resolve 2026 Maine 1120ME instruction PDF from live page')
+          fn='ME_Maine_1120ME_Instructions.pdf'; (OUT/fn).write_bytes(got[0])
+          rows.append(['Maine','ME','1120ME','2026','official_pdf',got[1],fn,'OK','Current 2026 1120ME instructions'])
+          with (OUT/'FINAL_TWO_MANIFEST.csv').open('w',newline='',encoding='utf-8-sig') as f:
+              w=csv.writer(f); w.writerow(['State','Abbrev','Core Form','Tax Year','Source Type','Source URL','PDF File','Status','Notes']); w.writerows(rows)
+          with zipfile.ZipFile('Final_Two_Corporate_Instructions.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in OUT.iterdir(): z.write(p,p.name)
+          PY
+          python /tmp/final_two.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-two-corporate-instructions
+          path: Final_Two_Corporate_Instructions.zip
+          retention-days: 1
